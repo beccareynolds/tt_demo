@@ -1,0 +1,327 @@
+---
+title: "TT tmap Demo"
+author: "Ronnie Bailey-Steinitz"
+date: "6/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+**REDLINING:** In the United States, redlining is the systematic denial of various services by federal government agencies, local governments as well as the private sector either directly or through the selective raising of prices. Neighborhoods with high proportion of minority residents are more likely to be redlined than other neighborhoods with similar household incomes, housing age and type, and other determinants of risk, but different racial composition (Source: Wikipedia)
+
+
+Background Information: Historic Home Owners' Loan Corporation Neighborhood Appraisal Map
+
+In 1934, the Federal Housing Administration created a financial mortgage system that rated mortgage risks for properties based on various criteria but was centered on race and ethnicity. This rating system propagated racial segregation that in many ways persists today.
+
+The FHA Underwriting Handbook incorporated color-coded real estate investment maps that classified neighborhoods based on assumptions about a community, primarily their racial and ethnic composition, and not on the financial ability of the residents to satisfy the obligations of a mortgage loan. These maps, created by the Home Owners Loan Corporation (HOLC) were used to determine where mortgages could or could not be issued.
+
+The neighborhoods were categoriezed into four types:
+
+**Type A** : Best - newer or areas stil in demand
+
+**Type B** : Still Desirable - areas expected to remain stable for many years
+
+**Type C** : Definitely Declining - areas in transition
+
+**Type D** : Hazardous - older areas considered risky
+
+
+Neighborhoods shaded red were deemed too hazardous for federally-back loans. **These "red-lined" neighborhoods were where most African American residents lived.**
+
+Many have argued tha the HOLC maps institutionalized discriminating lending practices which not only perpetuated racial segregation but also led to neighborhood disinvestment. Today, neighborhoods classified as Type C and Type D in 2934 make up the majority of neighborhoods in 2016 that are Areas of Concentrated Poverty where 50% or More are People of Color.
+
+Purpose: Representing this historic map in digital form allows users to compare historically characterized neighborhoods in relation to current demographic trends.
+
+Red-lining Data Time-Period: 01/01/1934
+
+0. Attach Packages
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#GIS
+library(sf) #create sf; extends data.frame-like objects with a simple feature list column
+library(tmap) #use this for mapping
+library(tmaptools) #use this for geocoding cities using OSM instead of Google (which requires API)
+library(rnaturalearth) #to download U.S. borders and state lines
+library(tigris) #use to download GIS TIGER shapefiles from the U.S. Census Bureau; The core TIGER/Line shapefiles do not include demographic data, but they do contain geographic entity codes (GEOIDs) that can be linked to the Census Bureau’s demographic data, available on data.census.gov.
+
+#other
+library(janitor) #clean data column names
+library(tidyverse)
+library(dplyr)
+library(plyr)
+library(forcats) #use for arranging or reordering factor levels
+
+filter <- dplyr::filter
+select <- dplyr::select
+```
+
+
+1. Load data
+```{r message=FALSE, warning=FALSE}
+projcrs <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0" #set project CRS
+
+#Minneapolis, Minnesota: Historic Home Owners' Loan Corporation Neighborhood Appraisal Map
+#Download Link: https://resources.gisdata.mn.gov/pub/gdrs/data/pub/us_mn_state_metc/plan_historic_holc_appraisal/shp_plan_historic_holc_appraisal.zip
+#Metadata: https://resources.gisdata.mn.gov/pub/gdrs/data/pub/us_mn_state_metc/plan_historic_holc_appraisal/metadata/metadata.html
+rl <- read_sf("HistoricHOLCNeighborhoodAppraisal.shp")
+
+#Log of Freedome of Press violation incidents during BLM protests in the U.S. -- maintained by PressFreedomTracker.US
+#Download Link: https://docs.google.com/spreadsheets/d/1zk9oFDJ3Ocbz80Z1ISSW4Sd5xv1vQTj_tF8KCbPsZxs/edit#gid=0
+fop <- read_csv("FreedomOfPress.csv") %>% 
+  clean_names()
+```
+
+
+
+2. Load GIS Data from US Census Bureau - Minnesota Counties
+```{r message=FALSE, warning=FALSE, results=FALSE}
+# MN state outline
+MNstate_lines <- tigris::states(cb = TRUE) %>% #If cb is set to TRUE, download a generalized (1:500k) states file. Defaults to FALSE (the most detailed TIGER/Line file)
+  subset(NAME == "Minnesota")
+plot(MNstate_lines)
+MNstate_lines_sf <- st_as_sf(MNstate_lines)
+#st_write(MNstate_lines_sf, "MNstate_lines.shp")
+
+# MN county lines: this can be used as is within tmap-- don't nedd to convert unless you want to do additional analysis
+MNcounty_lines <- tigris::counties(state = "MN", cb = TRUE) 
+plot(MNcounty_lines)
+
+# if you want to save it as a shapefile for export
+MNcounties_sf <- sf::st_as_sf(MNcounty_lines)
+#plot(MNcounties_sf)
+#st_write(MNcounties_sf, "MNcounty_lines.shp")
+
+```
+
+
+
+3. Redlining wrangling - reassigning and arranging neighborhood categories
+```{r message=FALSE, warning=FALSE, results=FALSE}
+# unique(rl$HSG_SCALE) #looking at neighborhood categories
+# [1] "Undeveloped"             "Still Desirable"         "Hazardous"               "Definitely Declining"    "Best"        
+# [6] "Park / Open Space"       "Business and Industrial" "Uncertain"               "Open Water"    
+
+rl_cats <- rl %>% 
+  #mutate(cats =  HSG_SCALE) %>% 
+  dplyr::rename(cats = HSG_SCALE)
+
+#reducing classification categories
+rl_cats$cats <- plyr::revalue(rl_cats$cats, c("Undeveloped"="Other"))
+rl_cats$cats <- plyr::revalue(rl_cats$cats, c("Business and Industrial"="Other"))
+rl_cats$cats <- plyr::revalue(rl_cats$cats, c("Open Water"="Other")) 
+rl_cats$cats <- plyr::revalue(rl_cats$cats, c("Park / Open Space"="Other"))
+rl_cats$cats[is.na(rl_cats$cats)] <- c("Other")
+
+#reorder factor levels
+cat_order <- c("Best", "Still Desirable", "Definitely Declining", "Other", "Hazardous")
+
+rl_ordered <- rl_cats %>% 
+  mutate(cats =  factor(cats, levels = cat_order)) %>%
+  arrange(cats) #reorder best -> least
+
+#create a bounding box for the redlining area (use to crop other shapes)
+
+#write wrangled data into new csv to share with TidyTuesday
+write_csv(rl_ordered, "minneapolis_redlining.csv", append = FALSE, na = "NA")
+```
+
+
+###### short demo:
+
+```{r}
+red <- tm_shape(MNcounty_lines) +
+  tm_borders(col = "blue")
+
+red
+
+```
+
+
+
+
+#### Minneapolis Redlining with *tmap*
+```{r message=FALSE, warning=FALSE}
+# map will be saved in a variable of class tmap
+redlining <- tm_shape(MNcounty_lines) + #county lines
+  tmap_options(basemaps = c(
+                            Canvas = "Esri.WorldGrayCanvas",
+                            Terrain = "Stamen.TerrainBackground",
+                            Imagery = "Esri.WorldImagery"
+                            ),
+                            overlays = c(Labels = paste0("http://services.arcgisonline.com/arcgis/rest/services/Canvas/", "World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}")), alpha = 0.8) + #you need to specify this URL for basemaps to show
+    tm_borders(col = "blue", alpha = 0.4, lwd = 1) +
+  
+  tm_shape(MNstate_lines) + #state lines
+    tm_borders(col = "magenta3", alpha = 0.2, lwd = 2) +
+  
+  tm_shape(rl_ordered) + #red-lining catergorization of each neighborhood in Minneapolis and St. Paul
+    tm_polygons("cats",
+                palette = "-Spectral",
+                border.alpha = 0.3,
+                id = "cats",
+                popup.vars = c("Category: " = "cats"),
+                title = "Redlining Areas in Minneapolis") +
+
+  tm_layout(title = "Redlining in Minneapolis", 
+            title.size = 1,
+            legend.outside.size = 0.5
+            ) +  
+  
+  tm_legend(legend.position = c("left", "bottom")) +
+  tm_scale_bar(breaks = c(0, 100, 200), position = c("right", "bottom"), color.dark = "grey70", color.light = "white") +
+  tmap_mode("view")
+
+redlining
+#tmap_save(redlining, filename = "redlining_tmap.html")
+```
+
+Four categories of neighborhoods:
+
+Type A : Best - newer or areas stil in demand
+
+Type B : Still Desirable - areas expected to remain stable for many years
+
+Type C : Definitely Declining - areas in transition
+
+Type D : Hazardous - older areas considered risky
+
+Neighborhoods in red were deemed too hazardous for federally-back loans. These "red-lined" neighborhoods were where most African American residents lived.
+
+
+
+***
+
+### Violations of Freedom of Press
+
+
+5. Wrangle Freedom of Press Data
+```{r message=FALSE, warning=FALSE, results=FALSE}
+
+states <- tigris::states(cb = TRUE)
+
+# FREEDOME of PRESS
+cities <- unique(fop$city) %>% 
+  na.omit()
+
+city_coords <- as.data.frame(tmaptools::geocode_OSM(cities)) #retrieves coords
+
+fop_coord <- left_join(fop, city_coords, by = c("city" = "query")) %>% 
+   drop_na(lat, lon) #this is now a dataset with lat-lon coords
+#View(fop_coord)
+
+#converting dataset to sf
+cities_sf <- sf::st_as_sf(x = fop_coord,                         
+           coords = c("lon", "lat"),
+           crs = projcrs) #using project CRS; now has sticky geometry
+#View(cities_sf)
+
+city_incidents <- cities_sf %>% 
+  group_by(city, state) %>% 
+  dplyr::summarise(
+    geometry = geometry[1],
+    count = n())
+
+city_incidents$place <- paste0(city_incidents$city, ", ", city_incidents$state)
+#class(city_incidents)
+
+#write_csv(city_incidents, "fop_incidentsbycity.csv", append = FALSE, na = "NA")
+
+
+# Get U.S. borders
+usa <- rnaturalearth::ne_countries(country = 'United States of America', scale = 'medium', type = 'map_units', returnclass = 'sf') 
+#write_sf(usa, "usa.shp")
+
+# Now get the urban area shapefiles for each of the cities
+urban <- tigris::urban_areas(cb = TRUE) %>% 
+  subset(NAME10 %in% unique(city_incidents$place))
+
+```
+
+
+
+#### Freedom of Press Violations with *tmap*
+```{r message=FALSE, warning=FALSE}
+
+freedom <- tm_shape(usa) + # saved in a variable of class tmap
+  tmap_options(basemaps = c(
+                            Canvas = "Esri.WorldGrayCanvas"
+                            ),
+                            overlays = c(Labels = paste0("http://services.arcgisonline.com/arcgis/rest/services/Canvas/", "World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}")), alpha = 0.5) + #you need to specify this for basemaps to show
+    tm_borders(col = "deeppink4", alpha = 0.5, lwd = 2) + #ADD U.S. border
+  
+  tm_shape(states) + #ADD state lines
+    tm_borders(col =  "seagreen3", alpha = 0.4, lwd = 1) +
+  
+  tm_shape(urban) + #ADD Urban areas
+    tm_fill(col = "grey30", alpha = 0.5) +
+    tm_borders(col =  "grey40", lwd = 1, alpha = 0.5) +
+
+  tm_shape(city_incidents) + #ADD bubbles with FoP incidents
+      tm_bubbles(
+                 id = "place",
+                 popup.vars = c("Location: " = "place", "Incidents: " = "count"),
+                 size = "count",
+                 col = "count",
+                 #midpoint = 10,
+                 style = "pretty",
+                 scale = 1.5,
+                 alpha = NA,
+                 palette = "YlOrRd",
+                 border.col = "black",
+                 border.lwd = 2,
+                 border.alpha = NA,
+                 #group = "All Families",
+                 title.col = "Freedom of Press Incidents"
+                 ) +
+
+  tm_layout(title = "Police Violations of Freedom of Speech", 
+            title.size = 1,
+            legend.outside.size = 0.5
+            ) +  
+  
+  tm_legend(legend.position = c("left", "bottom")) +
+  tm_scale_bar(breaks = c(0, 100, 200), position = c("right", "bottom"), color.dark = "grey70", color.light = "white") +
+  tmap_mode("view") #can use variable 'current.mode'
+
+freedom
+tmap_save(freedom, filename = "freedom_of_press_tmap.html")
+```
+
+
+
+6. Some other interesting data:
+```{r eval=FALSE}
+# Per-country census of self-reported race
+
+#Census Data-- per country (MN) percent of population that identified as "Black" or "African American": https://www2.census.gov/programs-surveys/popest/datasets/2010-2018/counties/asrh/cc-est2018-alldata-27.csv
+
+#Metadata: https://www2.census.gov/programs-surveys/popest/technical-documentation/file-layouts/2010-2018/cc-est2018-alldata.pdf
+
+census <- read_csv("cc-est2018-alldata-27.csv") %>% 
+  group_by(CTYNAME) %>% 
+  dplyr::summarise(
+    population = sum(TOT_POP),
+    black = sum(BA_MALE + BA_FEMALE + BAC_MALE + BAC_FEMALE) #BA = Black only, BAC = Black and other
+  ) %>% 
+  mutate(bl_percent = (black/population)) #now we have a per-county proportion of total population that is Black
+
+
+#Retrieve and append coordinates of each county to the above data
+census_places <- unique(census$CTYNAME)
+cen_coords <- as.data.frame(tmaptools::geocode_OSM(census_places)) #get coords for each city
+
+bl_pop <- dplyr::left_join(census, cen_coords, by = c("CTYNAME" = "query")) %>% 
+  drop_na(lat, lon) #joining coords with the census data; dropping any cities for which the coords are unknown
+#this is now a dataset with lat-lon coords
+# View(bl_pop)
+
+#create sf object from dataset
+bl_sf <- sf::st_as_sf(x = bl_pop,                         
+           coords = c("lon", "lat"),
+           crs = projcrs) #convert to sf
+
+```
+
